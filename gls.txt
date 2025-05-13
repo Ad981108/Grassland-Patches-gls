@@ -1,0 +1,145 @@
+
+# ----------------------
+library(readxl)     
+library(nlme)      
+library(sp)        
+library(spdep)      
+library(ggplot2)     
+library(dplyr)      
+library(knitr)      
+
+
+raw_data <- read_excel("data1.xlsx", sheet = "Sheet1")
+
+data <- raw_data %>%
+  rename(
+    GrasslandType = Patches,
+    lon = Longitude,
+    lat = Latitude
+  ) %>%
+  mutate(
+    GrasslandType = factor(GrasslandType, 
+                           levels = c("Shrubby", "Grassy", "Degraded", "Exposed")),
+    Transect = factor(Transect),
+    across(c(lon, lat), as.numeric)  
+  )
+
+
+cat("DataOverview:\n")
+str(data)
+cat("\nDistributionofgrasslandtypes:\n")
+table(data$GrasslandType) %>% kable() %>% print()
+
+coordinates(data) <- c("lon", "lat")
+
+dist_matrix <- spDists(data)
+
+max_dist <- max(dist_matrix) * 0.5
+nb <- dnearneigh(data, d1 = 0, d2 = max_dist)
+listw <- nb2listw(nb, style = "W")  
+
+base_model <- gls(
+  Index~ GrasslandType,
+  data = data,
+  method = "REML"
+)
+
+spatial_model <- gls(
+  Index~ GrasslandType,
+  data = data,
+  correlation = corSpatial(
+    form = ~ lon + lat,
+    nugget = TRUE,
+    type = "exponential"
+  ),
+  method = "REML"
+)
+
+aic_comparison <- data.frame(
+  Model = c("Base Model", "Spatial Model"),
+  AIC = c(AIC(base_model), AIC(spatial_model)),
+  BIC = c(BIC(base_model), BIC(spatial_model))
+)
+
+
+data$base_resid <- residuals(base_model)
+data$spatial_resid <- residuals(spatial_model)
+
+run_moran_test <- function(residuals, listw) {
+  test_result <- moran.test(
+    residuals,
+    listw = listw,
+    randomisation = TRUE,
+    na.action = na.exclude
+  )
+  
+  data.frame(
+    Moran_I = round(test_result$estimate[1], 4),
+    Expectation = round(test_result$estimate[2], 4),
+    Variance = round(test_result$estimate[3], 6),
+    P_value = round(test_result$p.value, 3)
+  )
+}
+
+moran_results <- rbind(
+  run_moran_test(data$base_resid, listw) %>% mutate(Model = "Base Model"),
+  run_moran_test(data$spatial_resid, listw) %>% mutate(Model = "Spatial Model")
+)
+
+
+model_effects <- data.frame(
+  Effect = names(coef(spatial_model)),  
+  Value = coef(spatial_model)           
+) %>% 
+  filter(Effect != "(Intercept)")       
+
+ggplot(model_effects, aes(x = Effect, y = Value)) +
+  geom_col(fill = "#2c7fb8", width = 0.6) +
+  labs(title = "1",
+       x = "grasslandtypes", y = "effect") +
+  theme_minimal()
+
+
+resid_data <- data.frame(
+  lon = coordinates(data)[,1],  
+  lat = coordinates(data)[,2], 
+  data@data,                   
+  spatial_resid = residuals(spatial_model)  )
+
+
+ggplot(resid_data, aes(x = lon, y = lat)) +
+  geom_point(aes(size = abs(spatial_resid), color = spatial_resid), alpha = 0.8) +
+  scale_color_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0) +
+  labs(title = "Residualdistributionofspatialmodel",
+       size = "AbsoluteResidual",
+       color = "ResidualValue") +
+  theme_bw()
+
+ggplot(moran_results, aes(x = Model, y = Moran_I, fill = Model)) +
+  geom_col(alpha = 0.8, width = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_text(aes(label = paste0("I = ", Moran_I, "\n(p = ", P_value, ")")),
+            vjust = -0.5) +
+  scale_fill_manual(values = c("#41b6c4", "#253494")) +
+  labs(title = "AutocorrelationComparisonOfModelResidualSpace",
+       y = "Moran's I") +
+  theme_classic()
+
+sink("analysis_results.txt")
+cat("=== Model comparison results ===\n")
+print(kable(aic_comparison))
+cat("\n=== Spatial autocorrelation test results ===\n")
+print(kable(moran_results))
+sink()
+
+ggsave("model_effects.png", width = 8, height = 6, dpi = 300)
+ggsave("residual_map.png", width = 10, height = 8, dpi = 300)
+ggsave("moran_plot.png", width = 7, height = 5, dpi = 300)
+
+write.csv(data@data, "processed_spatial_data.csv", row.names = FALSE)
+
+ggsave("model_effects.png", width = 8, height = 6, dpi = 300)
+ggsave("residual_distribution.png", residual_plot, width = 10, height = 8, dpi = 300)
+
+write.csv(data_df, "processed_spatial_data.csv", row.names = FALSE)
+
